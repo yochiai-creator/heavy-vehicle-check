@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>QRコード発行</h2>
+  <p class="muted">各車両に貼るQRコードです。読み取ると、その車両の点検画面が直接開きます。</p>
+  <div class="grid">
+    {% for row in qr_rows %}
+      <div class="card">
+        <h3>{{ row.vehicle.vehicle_no }}</h3>
+        <p>{{ row.vehicle.vehicle_name }}</p>
+        <img class="qr-img" src="{{ row.qr_path }}">
+        <p class="muted">{{ row.url }}</p>
+        <a class="btn full" href="{{ row.qr_path }}" download>QR画像保存</a>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}

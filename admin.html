@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>管理画面</h2>
+  <div class="grid">
+    <a class="btn" href="/csv">CSV出力</a>
+    <a class="btn btn-light" href="/backup">DBバックアップ</a>
+    <button class="btn btn-light" onclick="window.print()">印刷 / PDF保存</button>
+  </div>
+</div>
+<div class="card">
+  <h2>異常一覧</h2>
+  {% if abnormal %}
+    {% for r in abnormal %}
+      <div class="card">
+        <h3>{{ r.vehicle_no }} / {{ r.vehicle_name }}</h3>
+        <p>日時：{{ r.inspected_at }}　点検者：{{ r.inspector }}</p>
+        <div class="status-ng">使用不可</div>
+        <p><strong>異常内容：</strong>{{ r.abnormal_detail }}</p>
+        <p><strong>対応内容：</strong>{{ r.action_detail }}</p>
+        {% if r.photo_path %}
+          <img class="photo" src="/{{ r.photo_path }}">
+        {% endif %}
+        {% if r.manager_confirmed %}
+          <div class="status-ok">確認済：{{ r.manager_name }} / {{ r.manager_confirmed_at }}</div>
+        {% else %}
+          <form method="post" action="/confirm/{{ r.id }}">
+            <input type="hidden" name="vehicle_no" value="{{ r.vehicle_no }}">
+            <label>管理者名</label>
+            <input name="manager_name" required>
+            <br><br>
+            <button class="btn-ok full" type="submit">管理者確認して使用禁止を解除</button>
+          </form>
+        {% endif %}
+      </div>
+    {% endfor %}
+  {% else %}
+    <p>異常記録はありません。</p>
+  {% endif %}
+</div>
+<div class="card">
+  <h2>点検履歴</h2>
+  <div class="scroll">
+    <table>
+      <tr><th>日時</th><th>車両</th><th>点検者</th><th>判定</th><th>確認</th></tr>
+      {% for r in inspections %}
+        <tr>
+          <td>{{ r.inspected_at }}</td>
+          <td>{{ r.vehicle_no }} / {{ r.vehicle_name }}</td>
+          <td>{{ r.inspector }}</td>
+          <td>{{ r.result }}</td>
+          <td>{{ "確認済" if r.manager_confirmed else "未確認" }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<form method="post" enctype="multipart/form-data">
+  <div class="card">
+    <h2>{{ vehicle.vehicle_no }} / {{ vehicle.vehicle_name }}</h2>
+    <p class="muted">車種：{{ vehicle_types[vehicle.vehicle_type] }}</p>
+    {% if vehicle.use_locked %}
+      <div class="status-ng">この車両は使用禁止中です。管理者確認まで使用しないでください。</div>
+    {% endif %}
+    <label>点検者名</label>
+    <input name="inspector" required placeholder="氏名">
+    <label>メーター・走行距離・アワーメーター</label>
+    <input name="meter" placeholder="例：1234h / 56000km">
+  </div>
+  <div class="card">
+    <h2>点検項目</h2>
+    {% for item in items %}
+      <div class="card">
+        <strong>{{ item }}</strong>
+        <label><input type="radio" name="item_{{ item }}" value="良好" checked> 良好</label>
+        <label><input type="radio" name="item_{{ item }}" value="異常あり"> 異常あり</label>
+        <label><input type="radio" name="item_{{ item }}" value="対象外"> 対象外</label>
+      </div>
+    {% endfor %}
+  </div>
+  <div class="card">
+    <h2>異常時入力</h2>
+    <p class="muted">異常ありを選んだ場合は、異常内容・対応内容・写真が必須です。</p>
+    <label>異常内容</label>
+    <textarea name="abnormal_detail" placeholder="どこが、どう悪いか"></textarea>
+    <label>対応内容</label>
+    <textarea name="action_detail" placeholder="使用停止、修理依頼、管理者報告など"></textarea>
+    <label>写真添付</label>
+    <input type="file" name="photo" accept="image/*" capture="environment">
+  </div>
+  <button class="full" type="submit">点検記録を保存</button>
+</form>
+{% endblock %}

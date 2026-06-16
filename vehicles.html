@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h2>車両マスター</h2>
+  <form method="post">
+    <label>車両番号</label>
+    <input name="vehicle_no" placeholder="例：FL-003" required>
+    <label>車両名</label>
+    <input name="vehicle_name" placeholder="例：フォークリフト3号" required>
+    <label>車種</label>
+    <select name="vehicle_type">
+      {% for key,label in vehicle_types.items() %}
+        <option value="{{ key }}">{{ label }}</option>
+      {% endfor %}
+    </select>
+    <br><br>
+    <button class="full" type="submit">車両を登録</button>
+  </form>
+</div>
+<div class="card">
+  <h2>登録車両</h2>
+  <div class="scroll">
+    <table>
+      <tr><th>番号</th><th>車両名</th><th>車種</th><th>状態</th><th>使用禁止</th><th></th></tr>
+      {% for v in vehicles %}
+        <tr>
+          <td>{{ v.vehicle_no }}</td>
+          <td>{{ v.vehicle_name }}</td>
+          <td>{{ vehicle_types[v.vehicle_type] }}</td>
+          <td>{{ "有効" if v.active else "無効" }}</td>
+          <td>{{ "使用禁止" if v.use_locked else "" }}</td>
+          <td><a class="btn btn-light" href="/vehicle_toggle/{{ v.vehicle_no }}">有効/無効</a></td>
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}
