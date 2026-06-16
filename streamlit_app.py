@@ -1,6 +1,7 @@
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from io import BytesIO
+
 import pandas as pd
 import qrcode
 import streamlit as st
@@ -13,21 +14,7 @@ st.set_page_config(
 
 APP_URL = "https://heavy-vehicle-check-ghka28mxhavp4qrjpnkb7b.streamlit.app"
 DB_PATH = "vehicle_check.db"
-
 WEEK_JA = ["月", "火", "水", "木", "金", "土", "日"]
-
-def ja_date(d):
-    if not d:
-        return ""
-    return f"{d.year}年{d.month}月{d.day}日（{WEEK_JA[d.weekday()]}）"
-
-def reiwa_date(d):
-    if not d:
-        return ""
-    if d.year >= 2019:
-        return f"令和{d.year - 2018}年{d.month}月{d.day}日（{WEEK_JA[d.weekday()]}）"
-    return ja_date(d)
-
 
 VEHICLE_TYPES = {
     "forklift": "フォークリフト",
@@ -93,12 +80,31 @@ CHECK_ITEMS = {
     ],
 }
 
+def ja_date(d):
+    if not d:
+        return ""
+    return f"{d.year}年{d.month}月{d.day}日（{WEEK_JA[d.weekday()]}）"
+
+def reiwa_date(d):
+    if not d:
+        return ""
+    if d.year >= 2019:
+        return f"令和{d.year - 2018}年{d.month}月{d.day}日（{WEEK_JA[d.weekday()]}）"
+    return ja_date(d)
+
 def connect():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+def ensure_column(cur, table, column, definition):
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cur.fetchall()]
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 def init_db():
     con = connect()
     cur = con.cursor()
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS vehicles (
             vehicle_no TEXT PRIMARY KEY,
@@ -109,10 +115,9 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    cur.execute("PRAGMA table_info(vehicles)")
-    cols = [r[1] for r in cur.fetchall()]
-    if "next_inspection_date" not in cols:
-        cur.execute("ALTER TABLE vehicles ADD COLUMN next_inspection_date TEXT")
+    ensure_column(cur, "vehicles", "next_inspection_date", "TEXT")
+    ensure_column(cur, "vehicles", "note", "TEXT")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS inspections (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,11 +133,27 @@ def init_db():
             action_detail TEXT,
             photo_name TEXT,
             photo_bytes BLOB,
+            photo2_name TEXT,
+            photo2_bytes BLOB,
+            photo3_name TEXT,
+            photo3_bytes BLOB,
+            photo4_name TEXT,
+            photo4_bytes BLOB,
             manager_confirmed INTEGER DEFAULT 0,
             manager_name TEXT,
             manager_confirmed_at TEXT
         )
     """)
+    for col_name, col_type in [
+        ("photo2_name", "TEXT"),
+        ("photo2_bytes", "BLOB"),
+        ("photo3_name", "TEXT"),
+        ("photo3_bytes", "BLOB"),
+        ("photo4_name", "TEXT"),
+        ("photo4_bytes", "BLOB"),
+    ]:
+        ensure_column(cur, "inspections", col_name, col_type)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS inspection_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,6 +162,7 @@ def init_db():
             status TEXT NOT NULL
         )
     """)
+
     con.commit()
     con.close()
 
@@ -150,6 +172,7 @@ def seed_vehicles():
     cur.execute("SELECT COUNT(*) FROM vehicles")
     if cur.fetchone()[0] == 0:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        next_date = (date.today() + timedelta(days=30)).isoformat()
         samples = [
             ("FL-001", "フォークリフト1号", "forklift"),
             ("FL-002", "フォークリフト2号", "forklift"),
@@ -160,8 +183,10 @@ def seed_vehicles():
         ]
         for no, name, vtype in samples:
             cur.execute(
-                "INSERT INTO vehicles(vehicle_no, vehicle_name, vehicle_type, created_at, next_inspection_date) VALUES (?, ?, ?, ?, ?)",
-                (no, name, vtype, now, (date.today() + pd.Timedelta(days=30)).date().isoformat()),
+                """INSERT INTO vehicles(
+                    vehicle_no, vehicle_name, vehicle_type, active, use_locked, created_at, next_inspection_date, note
+                ) VALUES (?, ?, ?, 1, 0, ?, ?, ?)""",
+                (no, name, vtype, now, next_date, ""),
             )
     con.commit()
     con.close()
@@ -184,12 +209,21 @@ def get_vehicle(vehicle_no):
         return None
     return df.iloc[0].to_dict()
 
-def add_vehicle(vehicle_no, vehicle_name, vehicle_type):
+def add_vehicle(vehicle_no, vehicle_name, vehicle_type, next_inspection_date, note):
     con = connect()
     try:
         con.execute(
-            "INSERT INTO vehicles(vehicle_no, vehicle_name, vehicle_type, created_at) VALUES (?, ?, ?, ?)",
-            (vehicle_no, vehicle_name, vehicle_type, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            """INSERT INTO vehicles(
+                vehicle_no, vehicle_name, vehicle_type, active, use_locked, created_at, next_inspection_date, note
+            ) VALUES (?, ?, ?, 1, 0, ?, ?, ?)""",
+            (
+                vehicle_no,
+                vehicle_name,
+                vehicle_type,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                next_inspection_date.isoformat() if next_inspection_date else "",
+                note,
+            ),
         )
         con.commit()
         return True, "車両を登録しました。"
@@ -198,30 +232,40 @@ def add_vehicle(vehicle_no, vehicle_name, vehicle_type):
     finally:
         con.close()
 
-def update_vehicle(vehicle_no, vehicle_name, vehicle_type, active):
+def update_vehicle(vehicle_no, vehicle_name, vehicle_type, active, next_inspection_date, note):
     con = connect()
     con.execute(
-        "UPDATE vehicles SET vehicle_name=?, vehicle_type=?, active=? WHERE vehicle_no=?",
-        (vehicle_name, vehicle_type, 1 if active else 0, vehicle_no),
+        """UPDATE vehicles
+           SET vehicle_name=?, vehicle_type=?, active=?, next_inspection_date=?, note=?
+           WHERE vehicle_no=?""",
+        (
+            vehicle_name,
+            vehicle_type,
+            1 if active else 0,
+            next_inspection_date.isoformat() if next_inspection_date else "",
+            note,
+            vehicle_no,
+        ),
     )
     con.commit()
     con.close()
 
 def reset_vehicle_lock(vehicle_no):
     con = connect()
-    con.execute("UPDATE vehicles SET use_locked=0 WHERE vehicle_no=?", (vehicle_no,))
+    con.execute("UPDATE vehicles SET use_locked = 0 WHERE vehicle_no = ?", (vehicle_no,))
     con.commit()
     con.close()
 
-def save_inspection(vehicle, inspector, meter, statuses, abnormal_detail, action_detail, photo):
+def save_inspection(vehicle, inspection_date, inspector, meter, statuses, abnormal_detail, action_detail, photos):
     now = datetime.now()
     has_abnormal = any(v == "異常あり" for v in statuses.values())
     result = "使用不可" if has_abnormal else "使用可"
-    photo_name = ""
-    photo_bytes = None
-    if photo is not None:
-        photo_name = photo.name
-        photo_bytes = photo.getvalue()
+
+    photo_data = []
+    for p in (photos or [])[:4]:
+        photo_data.append((p.name, p.getvalue()))
+    while len(photo_data) < 4:
+        photo_data.append(("", None))
 
     con = connect()
     cur = con.cursor()
@@ -230,13 +274,16 @@ def save_inspection(vehicle, inspector, meter, statuses, abnormal_detail, action
         INSERT INTO inspections(
             inspected_at, inspection_date, vehicle_no, vehicle_name, vehicle_type,
             inspector, meter, result, abnormal_detail, action_detail,
-            photo_name, photo_bytes
+            photo_name, photo_bytes,
+            photo2_name, photo2_bytes,
+            photo3_name, photo3_bytes,
+            photo4_name, photo4_bytes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             now.strftime("%Y-%m-%d %H:%M:%S"),
-            now.strftime("%Y-%m-%d"),
+            inspection_date.isoformat(),
             vehicle["vehicle_no"],
             vehicle["vehicle_name"],
             vehicle["vehicle_type"],
@@ -245,8 +292,10 @@ def save_inspection(vehicle, inspector, meter, statuses, abnormal_detail, action
             result,
             abnormal_detail,
             action_detail,
-            photo_name,
-            photo_bytes,
+            photo_data[0][0], photo_data[0][1],
+            photo_data[1][0], photo_data[1][1],
+            photo_data[2][0], photo_data[2][1],
+            photo_data[3][0], photo_data[3][1],
         ),
     )
     inspection_id = cur.lastrowid
@@ -258,7 +307,7 @@ def save_inspection(vehicle, inspector, meter, statuses, abnormal_detail, action
         )
 
     if has_abnormal:
-        cur.execute("UPDATE vehicles SET use_locked=1 WHERE vehicle_no=?", (vehicle["vehicle_no"],))
+        cur.execute("UPDATE vehicles SET use_locked = 1 WHERE vehicle_no = ?", (vehicle["vehicle_no"],))
 
     con.commit()
     con.close()
@@ -269,7 +318,7 @@ def get_inspections(where="", params=()):
     query = "SELECT * FROM inspections"
     if where:
         query += " WHERE " + where
-    query += " ORDER BY inspected_at DESC"
+    query += " ORDER BY inspection_date DESC, inspected_at DESC"
     df = pd.read_sql_query(query, con, params=params)
     con.close()
     return df
@@ -287,14 +336,14 @@ def get_items(inspection_id):
 def confirm_inspection(inspection_id, vehicle_no, manager_name):
     con = connect()
     con.execute(
-        """
-        UPDATE inspections
-        SET manager_confirmed=1, manager_name=?, manager_confirmed_at=?
-        WHERE id=?
-        """,
+        """UPDATE inspections
+           SET manager_confirmed = 1,
+               manager_name = ?,
+               manager_confirmed_at = ?
+           WHERE id = ?""",
         (manager_name, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), inspection_id),
     )
-    con.execute("UPDATE vehicles SET use_locked=0 WHERE vehicle_no=?", (vehicle_no,))
+    con.execute("UPDATE vehicles SET use_locked = 0 WHERE vehicle_no = ?", (vehicle_no,))
     con.commit()
     con.close()
 
@@ -319,12 +368,58 @@ def get_query_vehicle():
 def csv_bytes(df):
     return df.to_csv(index=False).encode("utf-8-sig")
 
+def parse_iso_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+def render_photos(row, width=170):
+    cols = st.columns(4)
+    pairs = [
+        ("photo_name", "photo_bytes"),
+        ("photo2_name", "photo2_bytes"),
+        ("photo3_name", "photo3_bytes"),
+        ("photo4_name", "photo4_bytes"),
+    ]
+    shown = False
+    for idx, (name_col, bytes_col) in enumerate(pairs):
+        if bytes_col in row.index and row[bytes_col] is not None:
+            with cols[idx]:
+                st.image(row[bytes_col], caption=row.get(name_col, ""), width=width)
+            shown = True
+    if not shown:
+        st.caption("写真なし")
+
+def inspection_alerts():
+    df = get_vehicles(active_only=True)
+    if df.empty or "next_inspection_date" not in df.columns:
+        return pd.DataFrame()
+    today = date.today()
+    rows = []
+    for _, r in df.iterrows():
+        d = parse_iso_date(r.get("next_inspection_date", ""))
+        if d:
+            days = (d - today).days
+            if days <= 7:
+                rows.append({
+                    "車両番号": r["vehicle_no"],
+                    "車両名": r["vehicle_name"],
+                    "次回点検日": ja_date(d),
+                    "令和表示": reiwa_date(d),
+                    "残日数": days,
+                    "状態": "期限切れ" if days < 0 else "間近",
+                })
+    return pd.DataFrame(rows)
+
 init_db()
 seed_vehicles()
 
 st.markdown("""
 <style>
-.block-container { padding-top: 1rem; max-width: 1100px; }
+.block-container { padding-top: 1rem; max-width: 1120px; }
 div.stButton > button { border-radius: 10px; font-weight: 700; }
 [data-testid="stMetricValue"] { font-size: 24px; }
 @media print {
@@ -334,32 +429,13 @@ div.stButton > button { border-radius: 10px; font-weight: 700; }
 """, unsafe_allow_html=True)
 
 st.title("🚜 野田組 重機・車両 始業前点検")
-st.caption("URL固定版 / QR一括発行 / SQLite保存 / 写真DB保存 / 管理者確認 / CSV出力")
+st.caption("写真4枚対応 / 日本語履歴 / 点検日変更可 / URL固定 / QR発行 / SQLite保存")
 st.info(f"固定アプリURL：{APP_URL}")
 
-try:
-    _vdf = get_vehicles(active_only=True)
-    if "next_inspection_date" in _vdf.columns:
-        _alerts = []
-        for _, _r in _vdf.iterrows():
-            _s = _r.get("next_inspection_date", "")
-            if _s:
-                _d = datetime.strptime(_s, "%Y-%m-%d").date()
-                _days = (_d - date.today()).days
-                if _days <= 7:
-                    _alerts.append({
-                        "車両番号": _r["vehicle_no"],
-                        "車両名": _r["vehicle_name"],
-                        "次回点検日": ja_date(_d),
-                        "令和表示": reiwa_date(_d),
-                        "残日数": _days,
-                        "状態": "期限切れ" if _days < 0 else "間近",
-                    })
-        if _alerts:
-            st.warning("次回点検日が近い、または期限切れの車両があります。")
-            st.dataframe(pd.DataFrame(_alerts), use_container_width=True, hide_index=True)
-except Exception:
-    pass
+alerts = inspection_alerts()
+if not alerts.empty:
+    st.warning("次回点検日が近い、または期限切れの車両があります。")
+    st.table(alerts)
 
 menu = st.sidebar.radio(
     "メニュー",
@@ -376,7 +452,6 @@ if menu == "点検入力":
 
     query_vehicle = get_query_vehicle()
     options = vehicles["vehicle_no"].tolist()
-
     default_index = 0
     if query_vehicle in options:
         default_index = options.index(query_vehicle)
@@ -392,19 +467,19 @@ if menu == "点検入力":
     vehicle = get_vehicle(selected_no)
     vehicle_type = vehicle["vehicle_type"]
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("車両番号", vehicle["vehicle_no"])
-    col2.metric("車両名", vehicle["vehicle_name"])
-    col3.metric("車種", VEHICLE_TYPES.get(vehicle_type, vehicle_type))
+    c1, c2, c3 = st.columns(3)
+    c1.metric("車両番号", vehicle["vehicle_no"])
+    c2.metric("車両名", vehicle["vehicle_name"])
+    c3.metric("車種", VEHICLE_TYPES.get(vehicle_type, vehicle_type))
+
+    inspection_date = st.date_input("点検日", value=date.today())
+    st.caption(f"点検日：{ja_date(inspection_date)} / {reiwa_date(inspection_date)}")
 
     if vehicle.get("use_locked", 0):
         st.error("この車両は異常報告により使用禁止中です。管理者確認まで使用しないでください。")
 
     inspector = st.text_input("点検者名", placeholder="氏名")
     meter = st.text_input("メーター・走行距離・アワーメーター", placeholder="例：1234h / 56000km")
-
-    today = date.today()
-    st.caption(f"本日：{ja_date(today)} / {reiwa_date(today)}")
 
     st.subheader("点検項目")
     statuses = {}
@@ -421,13 +496,20 @@ if menu == "点検入力":
     has_abnormal = any(v == "異常あり" for v in statuses.values())
     abnormal_detail = ""
     action_detail = ""
-    photo = None
+    photos = []
 
     if has_abnormal:
         st.error("異常あり：この車両は使用不可として保存されます。")
         abnormal_detail = st.text_area("異常内容 ※必須", placeholder="どこが、どう悪いか")
         action_detail = st.text_area("対応内容 ※必須", placeholder="使用停止、修理依頼、管理者報告など")
-        photo = st.file_uploader("写真添付 ※必須", type=["jpg", "jpeg", "png", "webp", "heic"])
+        photos = st.file_uploader(
+            "写真添付 ※必須・最大4枚",
+            type=["jpg", "jpeg", "png", "webp", "heic"],
+            accept_multiple_files=True,
+        )
+        if photos and len(photos) > 4:
+            st.warning("写真は最大4枚までです。先頭4枚だけ保存します。")
+            photos = photos[:4]
 
     if has_abnormal:
         st.error("最終判定：使用不可")
@@ -437,10 +519,10 @@ if menu == "点検入力":
     if st.button("点検記録を保存", type="primary", use_container_width=True):
         if not inspector:
             st.warning("点検者名を入力してください。")
-        elif has_abnormal and (not abnormal_detail or not action_detail or photo is None):
+        elif has_abnormal and (not abnormal_detail or not action_detail or not photos):
             st.warning("異常ありの場合は、異常内容・対応内容・写真添付が必須です。")
         else:
-            save_inspection(vehicle, inspector, meter, statuses, abnormal_detail, action_detail, photo)
+            save_inspection(vehicle, inspection_date, inspector, meter, statuses, abnormal_detail, action_detail, photos)
             st.success("点検記録を保存しました。")
             st.balloons()
 
@@ -450,9 +532,9 @@ elif menu == "異常一覧":
     df = get_inspections("result = ?", ("使用不可",))
     unconfirmed = df[df["manager_confirmed"] == 0] if not df.empty else pd.DataFrame()
 
-    col1, col2 = st.columns(2)
-    col1.metric("異常件数", len(df))
-    col2.metric("未確認", len(unconfirmed))
+    c1, c2 = st.columns(2)
+    c1.metric("異常件数", len(df))
+    c2.metric("未確認", len(unconfirmed))
 
     manager_name = st.text_input("管理者名", placeholder="管理者確認に使用")
 
@@ -462,17 +544,16 @@ elif menu == "異常一覧":
         for _, row in df.iterrows():
             with st.container(border=True):
                 st.subheader(f"{row['vehicle_no']} / {row['vehicle_name']}")
-                st.write(f"日時：{row['inspected_at']}")
+                d = parse_iso_date(row["inspection_date"])
+                st.write(f"点検日：{ja_date(d)} / {reiwa_date(d)}")
                 st.write(f"点検者：{row['inspector']}")
                 st.error("使用不可")
                 st.write(f"異常内容：{row['abnormal_detail']}")
                 st.write(f"対応内容：{row['action_detail']}")
-
-                items = get_items(row["id"])
-                st.dataframe(items, use_container_width=True, hide_index=True)
-
-                if row["photo_bytes"] is not None:
-                    st.image(row["photo_bytes"], caption=row["photo_name"], width=320)
+                st.write("点検項目")
+                st.table(get_items(row["id"]))
+                st.write("写真")
+                render_photos(row)
 
                 if row["manager_confirmed"]:
                     st.success(f"管理者確認済：{row['manager_name']} / {row['manager_confirmed_at']}")
@@ -508,12 +589,31 @@ elif menu == "履歴・出力":
     if df.empty:
         st.info("該当する記録がありません。")
     else:
-        view_df = df.drop(columns=["photo_bytes"], errors="ignore")
-        view_df["点検日_日本語"] = view_df["inspection_date"].apply(lambda x: ja_date(datetime.strptime(x, "%Y-%m-%d").date()))
-        view_df["点検日_令和"] = view_df["inspection_date"].apply(lambda x: reiwa_date(datetime.strptime(x, "%Y-%m-%d").date()))
-        st.dataframe(view_df, use_container_width=True, hide_index=True)
+        st.subheader("履歴一覧")
+        for _, row in df.iterrows():
+            with st.container(border=True):
+                d = parse_iso_date(row["inspection_date"])
+                c1, c2, c3, c4 = st.columns(4)
+                c1.write(f"**点検日**\n{ja_date(d)}")
+                c2.write(f"**車両**\n{row['vehicle_no']} / {row['vehicle_name']}")
+                c3.write(f"**点検者**\n{row['inspector']}")
+                if row["result"] == "使用不可":
+                    c4.error("使用不可")
+                else:
+                    c4.success("使用可")
 
-        export_df = view_df.copy()
+                if row["meter"]:
+                    st.write(f"メーター：{row['meter']}")
+                if row["abnormal_detail"]:
+                    st.write(f"異常内容：{row['abnormal_detail']}")
+                if row["action_detail"]:
+                    st.write(f"対応内容：{row['action_detail']}")
+                render_photos(row, width=150)
+
+        export_df = df.drop(columns=["photo_bytes", "photo2_bytes", "photo3_bytes", "photo4_bytes"], errors="ignore").copy()
+        export_df["点検日_日本語"] = export_df["inspection_date"].apply(lambda x: ja_date(datetime.strptime(x, "%Y-%m-%d").date()))
+        export_df["点検日_令和"] = export_df["inspection_date"].apply(lambda x: reiwa_date(datetime.strptime(x, "%Y-%m-%d").date()))
+
         item_texts = []
         for _, row in df.iterrows():
             items = get_items(row["id"])
@@ -536,30 +636,41 @@ elif menu == "車両マスター":
         vehicle_no = st.text_input("車両番号", placeholder="例：FL-003")
         vehicle_name = st.text_input("車両名", placeholder="例：フォークリフト3号")
         vehicle_type = st.selectbox("車種", list(VEHICLE_TYPES.keys()), format_func=lambda x: VEHICLE_TYPES[x])
+        next_inspection_date = st.date_input("次回点検日", value=date.today() + timedelta(days=30))
+        st.caption(f"次回点検日：{ja_date(next_inspection_date)} / {reiwa_date(next_inspection_date)}")
+        note = st.text_area("備考", placeholder="車検、修理予定、管理メモなど")
         submitted = st.form_submit_button("登録", use_container_width=True)
 
         if submitted:
             if not vehicle_no or not vehicle_name:
                 st.warning("車両番号と車両名を入力してください。")
             else:
-                ok, msg = add_vehicle(vehicle_no, vehicle_name, vehicle_type)
-                st.success(msg) if ok else st.error(msg)
+                ok, msg = add_vehicle(vehicle_no, vehicle_name, vehicle_type, next_inspection_date, note)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
 
     df = get_vehicles(active_only=False)
     st.subheader("登録車両")
-    view_master = df.copy()
-    if "next_inspection_date" in view_master.columns:
-        def _fmt_next(x):
-            if not x:
-                return ""
-            try:
-                return ja_date(datetime.strptime(x, "%Y-%m-%d").date())
-            except Exception:
-                return ""
-        view_master["次回点検日_日本語"] = view_master["next_inspection_date"].apply(_fmt_next)
-    st.dataframe(view_master, use_container_width=True, hide_index=True)
+    if df.empty:
+        st.info("登録車両はありません。")
+    else:
+        for _, r in df.iterrows():
+            with st.container(border=True):
+                d = parse_iso_date(r.get("next_inspection_date", ""))
+                c1, c2, c3, c4 = st.columns(4)
+                c1.write(f"**車両番号**\n{r['vehicle_no']}")
+                c2.write(f"**車両名**\n{r['vehicle_name']}")
+                c3.write(f"**車種**\n{VEHICLE_TYPES.get(r['vehicle_type'], r['vehicle_type'])}")
+                c4.write(f"**状態**\n{'有効' if r['active'] else '無効'}")
+                if d:
+                    st.caption(f"次回点検日：{ja_date(d)} / {reiwa_date(d)}")
+                if r.get("use_locked", 0):
+                    st.error("使用禁止中")
+                if r.get("note"):
+                    st.write(f"備考：{r['note']}")
 
-    if not df.empty:
         st.subheader("車両情報の編集")
         target = st.selectbox("編集する車両", df["vehicle_no"].tolist())
         row = df[df["vehicle_no"] == target].iloc[0]
@@ -570,25 +681,17 @@ elif menu == "車両マスター":
             index=list(VEHICLE_TYPES.keys()).index(row["vehicle_type"]),
             format_func=lambda x: VEHICLE_TYPES[x],
         )
-        _old_next = row.get("next_inspection_date", "") if "next_inspection_date" in df.columns else ""
-        try:
-            _old_next_date = datetime.strptime(_old_next, "%Y-%m-%d").date() if _old_next else date.today()
-        except Exception:
-            _old_next_date = date.today()
-        next_inspection_date = st.date_input("次回点検日", value=_old_next_date)
-        st.caption(f"次回点検日：{ja_date(next_inspection_date)} / {reiwa_date(next_inspection_date)}")
+        old_next = parse_iso_date(row.get("next_inspection_date", ""))
+        new_next = st.date_input("次回点検日", value=old_next or date.today())
+        st.caption(f"次回点検日：{ja_date(new_next)} / {reiwa_date(new_next)}")
+        new_note = st.text_area("備考", value=row.get("note", "") or "")
         new_active = st.radio("状態", ["有効", "無効"], index=0 if row["active"] else 1, horizontal=True)
 
         c1, c2 = st.columns(2)
         if c1.button("車両情報を更新", use_container_width=True):
-            update_vehicle(target, new_name, new_type, new_active == "有効")
-            con = connect()
-            con.execute("UPDATE vehicles SET next_inspection_date=? WHERE vehicle_no=?", (next_inspection_date.isoformat(), target))
-            con.commit()
-            con.close()
+            update_vehicle(target, new_name, new_type, new_active == "有効", new_next, new_note)
             st.success("更新しました。")
             st.rerun()
-
         if c2.button("使用禁止を手動解除", use_container_width=True):
             reset_vehicle_lock(target)
             st.success("使用禁止を解除しました。")
@@ -607,10 +710,8 @@ elif menu == "QRコード発行":
             vehicles["vehicle_no"].tolist(),
             format_func=lambda no: f"{no} / {vehicles.loc[vehicles['vehicle_no'] == no, 'vehicle_name'].iloc[0]}",
         )
-
         url = qr_url(selected_no)
         st.code(url)
-
         png = make_qr_png(url)
         st.image(png, caption=url, width=280)
         st.download_button(
@@ -626,11 +727,7 @@ elif menu == "QR印刷台紙":
     st.info("全車両のQRを一覧表示します。ブラウザの印刷機能でPDF保存・印刷できます。")
     st.caption(f"発行日：{ja_date(date.today())} / {reiwa_date(date.today())}")
 
-    if st.button("印刷 / PDF保存"):
-        st.warning("ブラウザのメニューから印刷、または Ctrl + P でPDF保存してください。")
-
     vehicles = get_vehicles(active_only=True)
-
     if vehicles.empty:
         st.warning("車両マスターに車両を登録してください。")
     else:
@@ -647,7 +744,6 @@ elif menu == "QR印刷台紙":
 
 elif menu == "バックアップ":
     st.header("バックアップ")
-
     with open(DB_PATH, "rb") as f:
         st.download_button(
             "SQLiteデータベースをダウンロード",
@@ -656,5 +752,4 @@ elif menu == "バックアップ":
             mime="application/octet-stream",
             use_container_width=True,
         )
-
     st.warning("Streamlit Cloudは無料環境だとDBが消える可能性があります。本格運用は定期バックアップしてください。")
