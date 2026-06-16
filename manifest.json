@@ -1,0 +1,10 @@
+{
+  "name": "重機・車両 始業前点検",
+  "short_name": "始業前点検",
+  "description": "フォークリフト・ホイールローダー・ダンプの始業前点検アプリ",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f4f6",
+  "theme_color": "#111827",
+  "orientation": "portrait"
+}
